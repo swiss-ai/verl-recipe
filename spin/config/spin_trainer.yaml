@@ -23,6 +23,33 @@ actor_rollout_ref:
 algorithm:
   adv_estimator: null
 
+data:
+  # --- Optional off-policy (offline) DPO stream, mixed into each online step. ---
+  # offpolicy_files: path(s) to the offline preference data. Unset = pure online SPIN.
+  #   - text_chat  : verl parquet rows with chosen_response/rejected_response chat
+  #                  messages (re-tokenized at load time). offpolicy_files = parquet(s).
+  #   - indexed    : PRE-TOKENIZED Megatron .bin/.idx + pairs.parquet (no re-tokenization).
+  #                  offpolicy_files = the dataset ROOT directory.
+  #   - single_parquet : PRE-TOKENIZED single parquet with token-id columns.
+  #                  offpolicy_files = the parquet path.
+  offpolicy_format: text_chat        # text_chat | indexed | single_parquet
+  # offpolicy_files: null
+  # offpolicy_batch_size: null       # off-policy pairs added per step (default: train_batch_size)
+  # offpolicy_max_samples: -1        # cap offline dataset size (-1 = all)
+
+  # --- 'indexed' format knobs (where the indexed datasets class looks for its sources) ---
+  offpolicy_accepted_prefix: accepted
+  offpolicy_rejected_prefix: rejected
+  offpolicy_parquet_name: pairs.parquet
+  offpolicy_chosen_index_col: chosen_index
+  offpolicy_rejected_index_col: rejected_index
+  offpolicy_tokenizer_consistency: warn   # off | warn | error (checks manifest.json)
+
+  # --- 'single_parquet' format knobs ---
+  offpolicy_prompt_col: prompt_input_ids
+  offpolicy_chosen_col: chosen_input_ids
+  offpolicy_rejected_col: rejected_input_ids
+
 reward:
   # >0 enables STREAMING annotation: the agent loop scores each trajectory via
   # these reward-loop workers as it finishes generating (overlaps the judge with

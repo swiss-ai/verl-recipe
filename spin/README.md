@@ -58,6 +58,59 @@ Instead of only using a fixed target data distribution, the online generation lo
 
 ---
 
+## Mixed DPO: adding an offline preference stream
+
+Alongside the online self-play prompts (`data.train_files`), the recipe can mix a
+**fixed offline preference dataset** (`data.offpolicy_files`) into every step. Offline
+rows ship **pre-labeled** chosen/rejected pairs (no generation, no judge); the off-policy
+loader cycles when exhausted. Leaving `data.offpolicy_files` unset = pure online SPIN.
+
+### Mixing behavior & the ratio lever
+- Each step the online and offline pairs are **concatenated into a single DPO update**;
+  the loss is a uniform mean, so each pair is weighted equally. The effective on:off
+  contribution ratio is therefore the **count ratio**
+  `data.gen_batch_size : data.offpolicy_batch_size`, the only lever (e.g. `768:256` → 3:1).
+  There is no separate ratio/weight knob. (Both default to `data.train_batch_size` when
+  unset, i.e. a 1:1 ratio.)
+- `data.offpolicy_max_samples` caps the offline dataset **size** (repetition/diversity),
+  not the per-step ratio. Training length is driven by the **online** loader.
+- Reference log-probs are **always recomputed** against SPIN's dynamic reference model,
+  so any precomputed `ref_*_logps` carried by offline examples are currently ignored
+  (forward-compat only).
+
+### Offline data formats (`data.offpolicy_format`)
+| format | `offpolicy_files` points to | tokenization |
+|---|---|---|
+| `text_chat` (default) | parquet(s) with `prompt` + `chosen_response`/`rejected_response` chat messages | re-tokenized at load |
+| `indexed` | a **root dir** with Megatron `accepted.{bin,idx}` / `rejected.{bin,idx}` + `pairs.parquet` | **pre-tokenized** (prompt boundary via longest-common-prefix) |
+| `single_parquet` | a **parquet** with token-id list columns | **pre-tokenized** |
+
+Per-format override keys: `indexed` → `offpolicy_{accepted_prefix,rejected_prefix,parquet_name,chosen_index_col,rejected_index_col,tokenizer_consistency}`; `single_parquet` → `offpolicy_{prompt_col,chosen_col,rejected_col}`. See `config/spin_trainer.yaml` for defaults.
+
+### Minimal config example (`indexed`)
+```yaml
+data:
+  train_files: ~/data/gsm8k/train.parquet   # online prompts (self-play)
+  gen_batch_size: 768                        # online pairs / step
+  offpolicy_files: ~/data/offline_pref       # root dir: .bin/.idx + pairs.parquet
+  offpolicy_format: indexed
+  offpolicy_batch_size: 256                  # offline pairs / step -> 3:1 on:off
+  offpolicy_max_samples: -1                  # -1 = use all
+  offpolicy_tokenizer_consistency: warn      # off | warn | error (checks manifest.json)
+```
+
+### Implementation (`spin/offline_data/`)
+`build_offline_dataset(data, tokenizer)` selects an `OfflinePreferenceDataset` subclass
+from `offpolicy_format` via the `OFFLINE_FORMATS` registry (each subclass implements
+`from_config`). Subclasses (`IndexedPreferenceDataset`, `SingleParquetPreferenceDataset`)
+read their on-disk layout and yield token-id `PreferenceExample`s;
+`make_tokenized_offpolicy_collate_fn` + `assemble_offpolicy_pairs` build the **same**
+DataProto the trainer's off-policy block expects — tokenizer-free. **Adding a new format =
+new subclass + one registry entry, no trainer changes.** See `spin/DATA_LOADING.md` for the
+full dataloader/mixing reference.
+
+---
+
 ## Reproduce the Experiment (Example Setup)
 
 The following steps outline how to set up the environment and run the SPIN recipe, based on the provided test log using GSM8K and Qwen2.5-3B-Instruct.
@@ -154,8 +207,10 @@ The following steps outline how to set up the environment and run the SPIN recip
 * `fsdp_workers.py`: Implements Ray workers (Actor, Reference) potentially using FSDP.
 * `dp_actor.py`: Contains the actor class, including the DPO policy update logic.
 * `core_algos.py`: Includes helper functions for `compute_online_dpo_loss` and `compute_onlineDPO_pref`.
+* `offline_data/`: Pluggable PRE-TOKENIZED offline preference datasets for the off-policy / mixed DPO stream (base class + `indexed`/`single_parquet` formats + factory + collate/assembly). See the "Mixed DPO" section above.
 * `config/spin_trainer.yaml` (or similar): Main Hydra configuration file for the recipe.
 * `run_spin.sh` (or similar): Example bash script for launching a training run.
+* `DATA_LOADING.md`: Reference for online/offline dataloaders, expected formats, and dataset-mixing/ratio behavior.
 * `README.md`: This file.
 
 ---

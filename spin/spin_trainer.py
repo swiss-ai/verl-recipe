@@ -564,26 +564,47 @@ class RaySPINTrainer:
 
         # --- Off-policy dataloader (optional) ---
         offpolicy_files = self.config.data.get("offpolicy_files", None)
+        offpolicy_format = self.config.data.get("offpolicy_format", "text_chat")
         self.offpolicy_dataloader = None
         if offpolicy_files:
+            # Bump the seed so the off-policy sampler draws a different order than the
+            # on-policy one. (train_files is only needed by the text/RLHFDataset path.)
             offpolicy_data_config = OmegaConf.to_container(self.config.data, resolve=True)
-            offpolicy_data_config["train_files"] = offpolicy_files if isinstance(offpolicy_files, list) else [offpolicy_files]
             offpolicy_data_config["seed"] = (offpolicy_data_config.get("seed") or 42) + 7919
             offpolicy_data_config = OmegaConf.create(offpolicy_data_config)
 
-            offpolicy_dataset = create_rl_dataset(
-                offpolicy_data_config.train_files,
-                offpolicy_data_config,
-                self.tokenizer,
-                self.processor,
-                max_samples=self.config.data.get("offpolicy_max_samples", -1),
-            )
+            if offpolicy_format == "text_chat":
+                # Legacy text path: RLHFDataset rows carry chosen_response/rejected_response
+                # chat messages, re-tokenized later by tokenize_offpolicy_pairs.
+                offpolicy_files_list = offpolicy_files if isinstance(offpolicy_files, list) else [offpolicy_files]
+                offpolicy_dataset = create_rl_dataset( # TODO: what's create_rl_dataset and create_rl_sampler doing in detail?
+                    offpolicy_files_list,
+                    offpolicy_data_config,
+                    self.tokenizer,
+                    self.processor,
+                    max_samples=self.config.data.get("offpolicy_max_samples", -1),
+                )
+                offpolicy_collate_fn = make_spin_collate_fn(
+                    tokenizer=self.tokenizer,
+                    max_prompt_length=self.config.data.max_prompt_length,
+                    truncation=self.config.data.get("truncation", "error"),
+                )
+            else:
+                # Pre-tokenized path: a pluggable OfflinePreferenceDataset yields token ids
+                # that assemble_offpolicy_pairs turns into the same layout (no re-tokenization).
+                from recipe.spin.offline_data import (
+                    build_offline_dataset,
+                    make_tokenized_offpolicy_collate_fn,
+                )
+
+                offpolicy_dataset = build_offline_dataset(self.config.data, self.tokenizer)
+                offpolicy_collate_fn = make_tokenized_offpolicy_collate_fn(
+                    tokenizer=self.tokenizer,
+                    max_prompt_length=self.config.data.max_prompt_length,
+                    truncation=self.config.data.get("truncation", "error"),
+                )
+
             offpolicy_sampler = create_rl_sampler(offpolicy_data_config, offpolicy_dataset)
-            offpolicy_collate_fn = make_spin_collate_fn(
-                tokenizer=self.tokenizer,
-                max_prompt_length=self.config.data.max_prompt_length,
-                truncation=self.config.data.get("truncation", "error"),
-            )
             offpolicy_batch_size = self.config.data.get("offpolicy_batch_size", self.config.data.train_batch_size)
             self.offpolicy_dataloader = StatefulDataLoader(
                 dataset=offpolicy_dataset,
@@ -598,6 +619,7 @@ class RaySPINTrainer:
                 f"batch_size={offpolicy_batch_size}, dataset_size={len(offpolicy_dataset)}"
             )
 
+        # total train steps is determined by size of online dataloader
         total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
 
         if self.config.trainer.total_training_steps is not None:
@@ -1614,6 +1636,7 @@ class RaySPINTrainer:
                         if offpolicy_iterator is not None:
                             with _timer("offpolicy", timing_raw):
                                 try:
+                                    # Iterator Cycles if exhausted
                                     try:
                                         offpolicy_batch_dict = next(offpolicy_iterator)
                                     except StopIteration:
@@ -1627,9 +1650,18 @@ class RaySPINTrainer:
 
                                     max_resp_len = self.config.data.max_response_length
                                     max_prmpt_len = self.config.data.max_prompt_length
-                                    offpolicy_pairs = tokenize_offpolicy_pairs(
-                                        offpolicy_batch, self.tokenizer, max_prmpt_len, max_resp_len,
-                                    )
+                                    if self.config.data.get("offpolicy_format", "text_chat") == "text_chat":
+                                        offpolicy_pairs = tokenize_offpolicy_pairs( # TODO: needs to return respoonse mask etc
+                                            offpolicy_batch, self.tokenizer, max_prmpt_len, max_resp_len,
+                                        )
+                                    else:
+                                        # Pre-tokenized: build the identical layout from token ids
+                                        # (no re-tokenization). See recipe.spin.offline_data.
+                                        from recipe.spin.offline_data import assemble_offpolicy_pairs
+
+                                        offpolicy_pairs = assemble_offpolicy_pairs(
+                                            offpolicy_batch, self.tokenizer, max_prmpt_len, max_resp_len,
+                                        )
 
                                     offpolicy_pairs.meta_info["micro_batch_size"] = (
                                         self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size_per_gpu", 1)
