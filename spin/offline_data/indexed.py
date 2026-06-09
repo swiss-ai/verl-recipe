@@ -80,6 +80,8 @@ class IndexedPreferenceDataset(OfflinePreferenceDataset):
         tokenizer_consistency: str = "warn",
         drop_empty: bool = True,
         max_samples: int = -1,
+        selection: str = "head",
+        seed: int | None = None,
     ) -> None:
         if tokenizer_consistency not in _VALID_CONSISTENCY:
             raise ValueError(
@@ -121,7 +123,8 @@ class IndexedPreferenceDataset(OfflinePreferenceDataset):
             return (len(acc) - plen <= 0) or (len(rej) - plen <= 0)
 
         self._rows = self.select_rows(
-            len(self._chosen_idx), _is_empty, drop_empty, max_samples, "IndexedPreferenceDataset"
+            len(self._chosen_idx), _is_empty, drop_empty, max_samples, "IndexedPreferenceDataset",
+            selection=selection, seed=seed,
         )
 
         logger.info(
@@ -170,7 +173,11 @@ class IndexedPreferenceDataset(OfflinePreferenceDataset):
             logger.warning(msg)
 
     @classmethod
-    def from_config(cls, data_cfg, path: str, tokenizer) -> "IndexedPreferenceDataset":
+    def from_config(
+        cls, data_cfg, path: str, tokenizer, *, max_samples=None, selection=None, seed=None
+    ) -> "IndexedPreferenceDataset":
+        # max_samples/selection/seed may be overridden per-entry (offpolicy_datasets mixture);
+        # otherwise fall back to the global single-dataset config.
         return cls(
             root=path,
             max_prompt_length=data_cfg.get("max_prompt_length", None),
@@ -182,7 +189,9 @@ class IndexedPreferenceDataset(OfflinePreferenceDataset):
             rejected_index_col=data_cfg.get("offpolicy_rejected_index_col", DEFAULT_REJECTED_INDEX_COL),
             tokenizer=tokenizer,
             tokenizer_consistency=data_cfg.get("offpolicy_tokenizer_consistency", "warn"),
-            max_samples=data_cfg.get("offpolicy_max_samples", -1),
+            max_samples=max_samples if max_samples is not None else data_cfg.get("offpolicy_max_samples", -1),
+            selection=selection if selection is not None else data_cfg.get("offpolicy_selection", "head"),
+            seed=seed,
         )
 
     def __len__(self) -> int:

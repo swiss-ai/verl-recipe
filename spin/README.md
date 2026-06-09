@@ -85,7 +85,7 @@ loader cycles when exhausted. Leaving `data.offpolicy_files` unset = pure online
 | `indexed` | a **root dir** with Megatron `accepted.{bin,idx}` / `rejected.{bin,idx}` + `pairs.parquet` | **pre-tokenized** (prompt boundary via longest-common-prefix) |
 | `single_parquet` | a **parquet** with token-id list columns | **pre-tokenized** |
 
-Per-format override keys: `indexed` → `offpolicy_{accepted_prefix,rejected_prefix,parquet_name,chosen_index_col,rejected_index_col,tokenizer_consistency}`; `single_parquet` → `offpolicy_{prompt_col,chosen_col,rejected_col}`. See `config/spin_trainer.yaml` for defaults.
+Per-format override keys: `indexed` → `offpolicy_{accepted_prefix,rejected_prefix,parquet_name,chosen_index_col,rejected_index_col,tokenizer_consistency}`; `single_parquet` → `offpolicy_{prompt_col,chosen_col,rejected_col}`; `text_chat` → `offpolicy_{prompt_key,chosen_response_key,rejected_response_key}`. See `config/spin_trainer.yaml` for defaults.
 
 ### Minimal config example (`indexed`)
 ```yaml
@@ -99,15 +99,52 @@ data:
   offpolicy_tokenizer_consistency: warn      # off | warn | error (checks manifest.json)
 ```
 
+### Combining multiple offline datasets, with per-dataset caps (`data.offpolicy_datasets`)
+
+Instead of `offpolicy_files`, list several offline datasets — each **capped/subset
+independently** (its own `max_samples` + `selection`) **before** they are pooled into one
+stream. Uniform sampling over the pool means each source contributes in proportion to its
+capped size. Formats may be **mixed** per entry (incl. `text_chat` with `indexed` /
+`single_parquet`).
+
+```yaml
+data:
+  offpolicy_format: indexed          # default format for entries without `format`
+  offpolicy_batch_size: 256
+  offpolicy_selection: head          # global default; per-entry `selection` overrides
+  offpolicy_datasets:
+    - path: ~/data/dset1             # full Dataset 1 (no cap)
+    - path: ~/data/dset2
+      max_samples: 10000
+      selection: random              # 10k random rows from Dataset 2
+    - path: ~/data/text_pairs.parquet
+      format: text_chat              # mix a text dataset in
+      max_samples: 5000
+```
+
+- `selection: random` draws a **deterministic** subset (seeded deterministically from
+  `data.seed`), stable across runs/resumes. `head` keeps the first N. `max_samples: -1` /
+  omitted = full dataset.
+- Per-format column/prefix knobs (above) are read from the global `data` config and shared
+  across entries of that format.
+- A **single-entry** `offpolicy_datasets` list is the way to apply `max_samples`/`selection`
+  to one dataset (including a `text_chat` one).
+- If both `offpolicy_datasets` and `offpolicy_files` are set, `offpolicy_datasets` wins and
+  `offpolicy_files` is ignored (a warning is logged). (A single-source `text_chat` via
+  `offpolicy_files` still uses verl's `RLHFDataset` path; listing it under
+  `offpolicy_datasets` routes it through the unified tokenized-assembly path instead.)
+
 ### Implementation (`spin/offline_data/`)
 `build_offline_dataset(data, tokenizer)` selects an `OfflinePreferenceDataset` subclass
 from `offpolicy_format` via the `OFFLINE_FORMATS` registry (each subclass implements
-`from_config`). Subclasses (`IndexedPreferenceDataset`, `SingleParquetPreferenceDataset`)
-read their on-disk layout and yield token-id `PreferenceExample`s;
-`make_tokenized_offpolicy_collate_fn` + `assemble_offpolicy_pairs` build the **same**
-DataProto the trainer's off-policy block expects — tokenizer-free. **Adding a new format =
-new subclass + one registry entry, no trainer changes.** See `spin/DATA_LOADING.md` for the
-full dataloader/mixing reference.
+`from_config`). Subclasses (`IndexedPreferenceDataset`, `SingleParquetPreferenceDataset`,
+`TextChatPreferenceDataset`) read their on-disk layout and yield token-id
+`PreferenceExample`s; a mixture (`offpolicy_datasets`) builds each entry independently and
+pools them in a `ConcatPreferenceDataset`. `make_tokenized_offpolicy_collate_fn` +
+`assemble_offpolicy_pairs` then build the **same** DataProto the trainer's off-policy block
+expects — tokenizer-free for the pre-tokenized formats. **Adding a new format = new subclass
++ one registry entry, no trainer changes.** See `spin/DATA_LOADING.md` for the full
+dataloader/mixing reference.
 
 ---
 
@@ -207,7 +244,7 @@ The following steps outline how to set up the environment and run the SPIN recip
 * `fsdp_workers.py`: Implements Ray workers (Actor, Reference) potentially using FSDP.
 * `dp_actor.py`: Contains the actor class, including the DPO policy update logic.
 * `core_algos.py`: Includes helper functions for `compute_online_dpo_loss` and `compute_onlineDPO_pref`.
-* `offline_data/`: Pluggable PRE-TOKENIZED offline preference datasets for the off-policy / mixed DPO stream (base class + `indexed`/`single_parquet` formats + factory + collate/assembly). See the "Mixed DPO" section above.
+* `offline_data/`: Pluggable offline preference datasets for the off-policy / mixed DPO stream (base class + `indexed`/`single_parquet`/`text_chat` formats + `ConcatPreferenceDataset` mixture + factory + collate/assembly). See the "Mixed DPO" section above.
 * `config/spin_trainer.yaml` (or similar): Main Hydra configuration file for the recipe.
 * `run_spin.sh` (or similar): Example bash script for launching a training run.
 * `DATA_LOADING.md`: Reference for online/offline dataloaders, expected formats, and dataset-mixing/ratio behavior.

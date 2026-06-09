@@ -27,6 +27,7 @@ To add a format: implement an ``OfflinePreferenceDataset`` subclass and register
 ``OFFLINE_FORMATS`` below. No trainer changes needed.
 """
 
+import logging
 from collections import defaultdict
 
 import numpy as np
@@ -35,11 +36,15 @@ import torch
 from .base import (
     CHOSEN_RESPONSE_IDS_KEY,
     REJECTED_RESPONSE_IDS_KEY,
+    ConcatPreferenceDataset,
     OfflinePreferenceDataset,
     PreferenceExample,
 )
 from .indexed import IndexedPreferenceDataset
 from .single_parquet import SingleParquetPreferenceDataset
+from .text_chat import TextChatPreferenceDataset
+
+logger = logging.getLogger(__name__)
 
 # NOTE: verl (DataProto, postprocess_data) is imported lazily — see the collate fn and
 # the module-level __getattr__ for assemble_offpolicy_pairs — so that constructing
@@ -50,17 +55,24 @@ __all__ = [
     "PreferenceExample",
     "IndexedPreferenceDataset",
     "SingleParquetPreferenceDataset",
+    "TextChatPreferenceDataset",
+    "ConcatPreferenceDataset",
     "build_offline_dataset",
     "make_tokenized_offpolicy_collate_fn",
     "assemble_offpolicy_pairs",
     "OFFLINE_FORMATS",
 ]
 
-# format name -> dataset class. "text_chat" is NOT here: it is the legacy RLHFDataset
-# path handled directly in spin_trainer._create_dataloader.
+# format name -> dataset class. NOTE: a SINGLE-source text_chat dataset
+# (offpolicy_files + offpolicy_format=text_chat, no mixture) is still served by the
+# legacy RLHFDataset path in spin_trainer._create_dataloader for backward compatibility.
+# The TextChatPreferenceDataset entry here is used for text_chat datasets listed under
+# `offpolicy_datasets` (per-dataset max_samples/selection, and mixing with tokenized
+# formats).
 OFFLINE_FORMATS = {
     "indexed": IndexedPreferenceDataset,
     "single_parquet": SingleParquetPreferenceDataset,
+    "text_chat": TextChatPreferenceDataset,
 }
 
 
@@ -77,22 +89,64 @@ def _as_single_path(offpolicy_files):
     return offpolicy_files
 
 
+def _resolve_format(fmt):
+    if fmt not in OFFLINE_FORMATS:
+        raise ValueError(f"Unknown offline format={fmt!r}. Supported formats: {sorted(OFFLINE_FORMATS)}.")
+    return OFFLINE_FORMATS[fmt]
+
+
 def build_offline_dataset(data_cfg, tokenizer) -> OfflinePreferenceDataset:
-    """Construct the offline preference dataset selected by ``data_cfg.offpolicy_format``.
+    """Construct the offline preference dataset(s) for the off-policy DPO stream.
+
+    Two modes:
+    - **single** (``data.offpolicy_files``): one dataset of ``data.offpolicy_format``.
+    - **mixture** (``data.offpolicy_datasets``): a list of entries, each
+      ``{path, format?, max_samples?, selection?}``, built independently (per-dataset
+      ``max_samples``/``selection`` applied *before* combining) and pooled via
+      :class:`ConcatPreferenceDataset`. Per-format column/prefix knobs are read from the
+      global ``data`` config and shared across entries of that format.
 
     Dispatches purely through ``OFFLINE_FORMATS`` + each class's ``from_config`` — so a
     new format needs only a subclass (implementing ``from_config``) and a registry entry.
     """
-    fmt = data_cfg.get("offpolicy_format", "text_chat")
-    if fmt not in OFFLINE_FORMATS:
-        raise ValueError(
-            f"Unknown data.offpolicy_format={fmt!r}. "
-            f"Supported tokenized formats: {sorted(OFFLINE_FORMATS)} (or 'text_chat')."
+    default_fmt = data_cfg.get("offpolicy_format", "text_chat")
+    entries = data_cfg.get("offpolicy_datasets", None)
+
+    if entries and data_cfg.get("offpolicy_files", None):
+        logger.warning(
+            "Both data.offpolicy_datasets and data.offpolicy_files are set; using the "
+            "offpolicy_datasets mixture and ignoring offpolicy_files."
         )
+
+    if entries:
+        # Deterministic base seed so 'random' subsets are stable across runs/resumes.
+        base_seed = data_cfg.get("seed", None)
+        base_seed = 42 if base_seed is None else int(base_seed)
+        global_selection = data_cfg.get("offpolicy_selection", "head")
+        subsets = []
+        for i, entry in enumerate(entries):
+            path = entry.get("path", None)
+            if not path:
+                raise ValueError(f"data.offpolicy_datasets[{i}] is missing required key 'path'.")
+            cls = _resolve_format(entry.get("format", default_fmt))
+            subsets.append(
+                cls.from_config(
+                    data_cfg,
+                    path,
+                    tokenizer,
+                    max_samples=entry.get("max_samples", -1),
+                    selection=entry.get("selection", global_selection),
+                    seed=base_seed + i,
+                )
+            )
+        return ConcatPreferenceDataset(subsets)
+
+    # single-dataset mode
+    cls = _resolve_format(default_fmt)
     path = _as_single_path(data_cfg.get("offpolicy_files", None))
     if not path:
-        raise ValueError("data.offpolicy_files must be set to build an offline dataset.")
-    return OFFLINE_FORMATS[fmt].from_config(data_cfg, path, tokenizer)
+        raise ValueError("data.offpolicy_files (or data.offpolicy_datasets) must be set to build an offline dataset.")
+    return cls.from_config(data_cfg, path, tokenizer)
 
 
 def make_tokenized_offpolicy_collate_fn(tokenizer, max_prompt_length: int, truncation: str = "error"):

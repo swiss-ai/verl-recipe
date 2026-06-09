@@ -47,7 +47,8 @@ class SingleParquetPreferenceDataset(OfflinePreferenceDataset):
         rejected_col: str = DEFAULT_REJECTED_COL,
         drop_empty: bool = True,
         max_samples: int = -1,
-        **_ignored,
+        selection: str = "head",
+        seed: int | None = None,
     ) -> None:
         import pandas as pd
 
@@ -74,10 +75,14 @@ class SingleParquetPreferenceDataset(OfflinePreferenceDataset):
             drop_empty,
             max_samples,
             "SingleParquetPreferenceDataset",
+            selection=selection,
+            seed=seed,
         )
 
     @classmethod
-    def from_config(cls, data_cfg, path: str, tokenizer) -> "SingleParquetPreferenceDataset":
+    def from_config(
+        cls, data_cfg, path: str, tokenizer, *, max_samples=None, selection=None, seed=None
+    ) -> "SingleParquetPreferenceDataset":
         return cls(
             parquet_path=path,
             max_prompt_length=data_cfg.get("max_prompt_length", None),
@@ -85,7 +90,9 @@ class SingleParquetPreferenceDataset(OfflinePreferenceDataset):
             prompt_col=data_cfg.get("offpolicy_prompt_col", DEFAULT_PROMPT_COL),
             chosen_col=data_cfg.get("offpolicy_chosen_col", DEFAULT_CHOSEN_COL),
             rejected_col=data_cfg.get("offpolicy_rejected_col", DEFAULT_REJECTED_COL),
-            max_samples=data_cfg.get("offpolicy_max_samples", -1),
+            max_samples=max_samples if max_samples is not None else data_cfg.get("offpolicy_max_samples", -1),
+            selection=selection if selection is not None else data_cfg.get("offpolicy_selection", "head"),
+            seed=seed,
         )
 
     def __len__(self) -> int:

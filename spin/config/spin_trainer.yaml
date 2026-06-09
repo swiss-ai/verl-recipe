@@ -36,6 +36,22 @@ data:
   # offpolicy_files: null
   # offpolicy_batch_size: null       # off-policy pairs added per step (default: train_batch_size)
   # offpolicy_max_samples: -1        # cap offline dataset size (-1 = all)
+  # offpolicy_selection: head        # head | random — how offpolicy_max_samples subsets a dataset
+
+  # --- Per-dataset mixture (optional; overrides offpolicy_files when set) ---
+  # A list of offline datasets, each capped/subset INDEPENDENTLY with its own
+  # max_samples + selection, then pooled into one stream (uniform sampling over the pool,
+  # so each source contributes in proportion to its capped size). Works for ALL formats
+  # incl. text_chat, and formats may be MIXED via per-entry `format`. Use a single-entry
+  # list to apply max_samples/selection to one dataset (incl. a text one).
+  # offpolicy_datasets:
+  #   - path: /data/dset1                       # full dataset (no cap), inherits offpolicy_format
+  #   - path: /data/dset2
+  #     max_samples: 10000
+  #     selection: random                       # 10k random rows
+  #   - path: /data/text_pairs.parquet
+  #     format: text_chat                        # mix a text dataset in
+  #     max_samples: 5000
 
   # --- 'indexed' format knobs (where the indexed datasets class looks for its sources) ---
   offpolicy_accepted_prefix: accepted
@@ -49,6 +65,11 @@ data:
   offpolicy_prompt_col: prompt_input_ids
   offpolicy_chosen_col: chosen_input_ids
   offpolicy_rejected_col: rejected_input_ids
+
+  # --- 'text_chat' knobs (only when text_chat appears in offpolicy_datasets) ---
+  offpolicy_prompt_key: prompt                  # column holding the chat messages
+  offpolicy_chosen_response_key: chosen_response
+  offpolicy_rejected_response_key: rejected_response
 
 reward:
   # >0 enables STREAMING annotation: the agent loop scores each trajectory via

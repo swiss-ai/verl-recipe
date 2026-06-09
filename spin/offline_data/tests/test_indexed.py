@@ -36,8 +36,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from spin.offline_data import (  # noqa: E402
+    ConcatPreferenceDataset,
     IndexedPreferenceDataset,
     SingleParquetPreferenceDataset,
+    TextChatPreferenceDataset,
     build_offline_dataset,
 )
 from spin.offline_data.base import PreferenceExample  # noqa: E402
@@ -95,6 +97,39 @@ class _FakeTokenizer:
     pad_token_id = 999
     eos_token_id = 999
     name_or_path = "fake/tokenizer"
+
+
+class _FakeChatTokenizer(_FakeTokenizer):
+    """Deterministic chat tokenizer: chat template = 'role:content' joined by '|', with
+    'add_generation_prompt' appending '|assistant:'; tokenization = per-character code.
+    This makes the prompt text a strict prefix of the full text, so the response-suffix
+    slicing in TextChatPreferenceDataset is exercised end-to-end."""
+
+    def apply_chat_template(self, messages, add_generation_prompt=False, tokenize=False):
+        text = "|".join(f"{m['role']}:{m['content']}" for m in messages)
+        if add_generation_prompt:
+            text += "|assistant:"
+        return text
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": [ord(c) for c in text]}
+
+
+class _Cfg(dict):
+    """Minimal data-config stand-in supporting .get(key, default)."""
+
+    def get(self, k, d=None):
+        return super().get(k, d)
+
+
+def _write_single_parquet(path, n, prompt_len=2, resp_len=2, base=0):
+    pd.DataFrame(
+        {
+            "prompt_input_ids": [[base + i, base + i + 1][:prompt_len] for i in range(n)],
+            "chosen_input_ids": [[1000 + i] * resp_len for i in range(n)],
+            "rejected_input_ids": [[2000 + i] * resp_len for i in range(n)],
+        }
+    ).to_parquet(str(path))
 
 
 # ----------------------------- data layer (no verl) -----------------------------
@@ -273,12 +308,187 @@ def test_build_offline_dataset_factory(tmp_path):
     assert isinstance(build_offline_dataset(cfg_sp, tokenizer=None), SingleParquetPreferenceDataset)
 
     cfg_bad = _Cfg(offpolicy_format="nope", offpolicy_files=str(tmp_path))
-    with pytest.raises(ValueError, match="Unknown data.offpolicy_format"):
+    with pytest.raises(ValueError, match="Unknown offline format"):
         build_offline_dataset(cfg_bad, tokenizer=None)
 
     cfg_nopath = _Cfg(offpolicy_format="indexed")
     with pytest.raises(ValueError, match="offpolicy_files"):
         build_offline_dataset(cfg_nopath, tokenizer=None)
+
+
+# --------------------- per-dataset selection / mixture (no verl) ---------------------
+
+
+def test_select_rows_head_vs_random_and_determinism():
+    sr = IndexedPreferenceDataset.select_rows  # staticmethod on the base class
+    head = sr(10, None, False, 4, "t", selection="head")
+    assert head.tolist() == [0, 1, 2, 3]
+
+    r1 = sr(10, None, False, 4, "t", selection="random", seed=123)
+    r2 = sr(10, None, False, 4, "t", selection="random", seed=123)
+    assert len(r1) == 4
+    assert r1.tolist() == r2.tolist()                      # deterministic given seed
+    assert r1.tolist() == sorted(r1.tolist())              # sorted for read locality
+    assert set(r1.tolist()).issubset(set(range(10)))
+    # different seed -> (very likely) different subset
+    r3 = sr(10, None, False, 4, "t", selection="random", seed=999)
+    assert r1.tolist() != r3.tolist()
+    # cap >= n keeps all; cap < 0 keeps all
+    assert sr(3, None, False, 10, "t", selection="random", seed=1).tolist() == [0, 1, 2]
+    assert sr(3, None, False, -1, "t").tolist() == [0, 1, 2]
+    with pytest.raises(ValueError, match="unknown selection"):
+        sr(5, None, False, 2, "t", selection="middle")
+
+
+def test_indexed_random_selection_reproducible(tmp_path):
+    # 4 distinct pairs; cap to 2 random, deterministic by seed.
+    accepted = [[i, i + 1, 100 + i, 101 + i] for i in range(4)]
+    rejected = [[i, i + 1, 200 + i] for i in range(4)]
+    _write_megatron_indexed(str(tmp_path / "accepted"), accepted)
+    _write_megatron_indexed(str(tmp_path / "rejected"), rejected)
+    pd.DataFrame({"chosen_index": list(range(4)), "rejected_index": list(range(4))}).to_parquet(
+        str(tmp_path / "pairs.parquet")
+    )
+    a = IndexedPreferenceDataset(root=str(tmp_path), max_samples=2, selection="random", seed=7)
+    b = IndexedPreferenceDataset(root=str(tmp_path), max_samples=2, selection="random", seed=7)
+    assert len(a) == 2
+    assert [a[i].prompt_input_ids for i in range(2)] == [b[i].prompt_input_ids for i in range(2)]
+
+
+def test_concat_preference_dataset(tmp_path):
+    p1, p2 = tmp_path / "a.parquet", tmp_path / "b.parquet"
+    _write_single_parquet(p1, 3, base=0)
+    _write_single_parquet(p2, 2, base=500)
+    d1 = SingleParquetPreferenceDataset(parquet_path=str(p1))
+    d2 = SingleParquetPreferenceDataset(parquet_path=str(p2))
+    concat = ConcatPreferenceDataset([d1, d2])
+    assert len(concat) == 5
+    assert concat[0].prompt_input_ids == d1[0].prompt_input_ids        # first source
+    assert concat[3].prompt_input_ids == d2[0].prompt_input_ids        # crosses into 2nd
+    assert concat[4].prompt_input_ids == d2[1].prompt_input_ids
+    with pytest.raises(ValueError, match="at least one"):
+        ConcatPreferenceDataset([])
+
+
+def test_build_mixture_per_dataset_max_samples(tmp_path):
+    # Full dataset 1 (5 rows) + 2 random rows from dataset 2 (10 rows) -> pool of 7.
+    p1, p2 = tmp_path / "d1.parquet", tmp_path / "d2.parquet"
+    _write_single_parquet(p1, 5, base=0)
+    _write_single_parquet(p2, 10, base=500)
+    cfg = _Cfg(
+        offpolicy_format="single_parquet",
+        offpolicy_datasets=[
+            {"path": str(p1)},                                    # full
+            {"path": str(p2), "max_samples": 2, "selection": "random"},
+        ],
+        seed=0,
+    )
+    ds = build_offline_dataset(cfg, tokenizer=None)
+    assert isinstance(ds, ConcatPreferenceDataset)
+    assert len(ds) == 7  # 5 + 2
+    with pytest.raises(ValueError, match="missing required key 'path'"):
+        build_offline_dataset(_Cfg(offpolicy_format="single_parquet", offpolicy_datasets=[{}]), tokenizer=None)
+
+
+def test_text_chat_dataset(tmp_path):
+    path = str(tmp_path / "text.parquet")
+    pd.DataFrame(
+        {
+            "prompt": [[{"role": "user", "content": "hi"}]],
+            "chosen_response": [{"role": "assistant", "content": "hello"}],
+            "rejected_response": [{"role": "assistant", "content": "no"}],
+        }
+    ).to_parquet(path)
+    ds = TextChatPreferenceDataset(parquet_path=path, tokenizer=_FakeChatTokenizer())
+    assert len(ds) == 1
+    ex = ds[0]
+    # prompt text "user:hi|assistant:" is a prefix of full; response = the suffix chars.
+    assert ex.chosen_input_ids == [ord(c) for c in "hello"]
+    assert ex.rejected_input_ids == [ord(c) for c in "no"]
+    assert ex.prompt_input_ids == [ord(c) for c in "user:hi|assistant:"]
+
+
+def test_build_mixture_text_and_tokenized(tmp_path):
+    # Mix a pre-tokenized single_parquet dataset with a text_chat dataset in one stream.
+    sp = tmp_path / "sp.parquet"
+    _write_single_parquet(sp, 3, base=0)
+    txt = str(tmp_path / "text.parquet")
+    pd.DataFrame(
+        {
+            "prompt": [[{"role": "user", "content": "q"}], [{"role": "user", "content": "w"}]],
+            "chosen_response": [{"role": "assistant", "content": "aa"}, {"role": "assistant", "content": "bb"}],
+            "rejected_response": [{"role": "assistant", "content": "x"}, {"role": "assistant", "content": "y"}],
+        }
+    ).to_parquet(txt)
+    cfg = _Cfg(
+        offpolicy_format="single_parquet",  # default for entries without explicit format
+        offpolicy_datasets=[
+            {"path": str(sp)},
+            {"path": txt, "format": "text_chat"},
+        ],
+        seed=0,
+    )
+    ds = build_offline_dataset(cfg, tokenizer=_FakeChatTokenizer())
+    assert isinstance(ds, ConcatPreferenceDataset)
+    assert len(ds) == 5  # 3 tokenized + 2 text
+    # last two come from the text dataset
+    assert ds[3].chosen_input_ids == [ord(c) for c in "aa"]
+    assert ds[4].rejected_input_ids == [ord(c) for c in "y"]
+
+
+def test_text_chat_as_messages_normalization():
+    msgs = [{"role": "user", "content": "x"}]
+    assert TextChatPreferenceDataset._as_messages(list(msgs)) == msgs
+    assert TextChatPreferenceDataset._as_messages(np.array(msgs, dtype=object)) == msgs
+
+
+def test_text_chat_drop_empty(tmp_path):
+    path = str(tmp_path / "t.parquet")
+    pd.DataFrame(
+        {
+            "prompt": [
+                [{"role": "user", "content": "a"}],
+                [{"role": "user", "content": "b"}],
+            ],
+            # row 1 has an empty chosen response -> dropped by drop_empty
+            "chosen_response": [{"role": "assistant", "content": "x"}, {"role": "assistant", "content": "  "}],
+            "rejected_response": [{"role": "assistant", "content": "p"}, {"role": "assistant", "content": "q"}],
+        }
+    ).to_parquet(path)
+    ds = TextChatPreferenceDataset(parquet_path=path, tokenizer=_FakeChatTokenizer())
+    assert len(ds) == 1
+    assert ds[0].chosen_input_ids == [ord(c) for c in "x"]
+
+
+def test_text_chat_random_selection_deterministic(tmp_path):
+    path = str(tmp_path / "t.parquet")
+    pd.DataFrame(
+        {
+            "prompt": [[{"role": "user", "content": str(i)}] for i in range(6)],
+            "chosen_response": [{"role": "assistant", "content": f"c{i}"} for i in range(6)],
+            "rejected_response": [{"role": "assistant", "content": f"r{i}"} for i in range(6)],
+        }
+    ).to_parquet(path)
+    a = TextChatPreferenceDataset(path, _FakeChatTokenizer(), max_samples=3, selection="random", seed=5)
+    b = TextChatPreferenceDataset(path, _FakeChatTokenizer(), max_samples=3, selection="random", seed=5)
+    assert len(a) == 3
+    assert [a[i].chosen_input_ids for i in range(3)] == [b[i].chosen_input_ids for i in range(3)]
+
+
+def test_build_mixture_takes_precedence_over_files(tmp_path):
+    # When both offpolicy_files and offpolicy_datasets are set, the mixture wins.
+    p1 = tmp_path / "d1.parquet"
+    _write_single_parquet(p1, 2)
+    ignored = tmp_path / "ignored.parquet"
+    _write_single_parquet(ignored, 9)
+    cfg = _Cfg(
+        offpolicy_format="single_parquet",
+        offpolicy_files=str(ignored),
+        offpolicy_datasets=[{"path": str(p1)}],
+    )
+    ds = build_offline_dataset(cfg, tokenizer=None)
+    assert isinstance(ds, ConcatPreferenceDataset)
+    assert len(ds) == 2  # from the mixture (d1), not the 9-row offpolicy_files
 
 
 # ----------------------- collate + assembly (requires verl) -----------------------
@@ -321,3 +531,46 @@ def test_assemble_offpolicy_pairs_layout(tmp_path):
     # prompt is left-padded to max_prompt_length
     prompts = pairs.batch["prompts"]
     assert prompts[0].tolist() == [tok.pad_token_id] * 6 + [40, 41]
+
+
+def test_assemble_over_mixture(tmp_path):
+    pytest.importorskip("verl", reason="assembly path needs verl (DataProto/postprocess_data)")
+    from spin.offline_data import (
+        assemble_offpolicy_pairs,
+        make_tokenized_offpolicy_collate_fn,
+    )
+    from verl import DataProto
+
+    # Pool a single_parquet dataset with a text_chat dataset, then collate+assemble the
+    # whole mixture (the end-to-end path the trainer takes for a mixed offline stream).
+    sp = tmp_path / "sp.parquet"
+    _write_single_parquet(sp, 2, base=0, resp_len=2)
+    txt = str(tmp_path / "t.parquet")
+    pd.DataFrame(
+        {
+            "prompt": [[{"role": "user", "content": "q"}]],
+            "chosen_response": [{"role": "assistant", "content": "ab"}],
+            "rejected_response": [{"role": "assistant", "content": "z"}],
+        }
+    ).to_parquet(txt)
+    cfg = _Cfg(
+        offpolicy_format="single_parquet",
+        offpolicy_datasets=[{"path": str(sp)}, {"path": txt, "format": "text_chat"}],
+        max_prompt_length=8,
+        max_response_length=4,
+        seed=0,
+    )
+    tok = _FakeChatTokenizer()
+    ds = build_offline_dataset(cfg, tokenizer=tok)
+    n = len(ds)
+    assert n == 3  # 2 tokenized + 1 text
+
+    collate = make_tokenized_offpolicy_collate_fn(tok, max_prompt_length=8)
+    batch = DataProto.from_single_dict(collate([ds[i] for i in range(n)]))
+    assert batch.batch.batch_size[0] == n
+
+    pairs = assemble_offpolicy_pairs(batch, tok, 8, 4)
+    assert pairs.batch.batch_size[0] == 2 * n
+    assert tuple(pairs.batch["input_ids"].shape) == (2 * n, 8 + 4)
+    # the text entry is the last row of each half; its chosen response is "ab"
+    assert pairs.batch["responses"][n - 1].tolist()[:2] == [ord("a"), ord("b")]

@@ -563,17 +563,29 @@ class RaySPINTrainer:
         )
 
         # --- Off-policy dataloader (optional) ---
+        # Triggered by either a single source (offpolicy_files) or a per-dataset mixture
+        # (offpolicy_datasets, tokenized formats only).
         offpolicy_files = self.config.data.get("offpolicy_files", None)
+        offpolicy_datasets = self.config.data.get("offpolicy_datasets", None)
         offpolicy_format = self.config.data.get("offpolicy_format", "text_chat")
         self.offpolicy_dataloader = None
-        if offpolicy_files:
+        # Whether the off-policy batch is built from pre-tokenized PreferenceExamples
+        # (assemble_offpolicy_pairs) vs the legacy text path (tokenize_offpolicy_pairs).
+        self.offpolicy_pretokenized = False
+        if offpolicy_files or offpolicy_datasets:
             # Bump the seed so the off-policy sampler draws a different order than the
             # on-policy one. (train_files is only needed by the text/RLHFDataset path.)
             offpolicy_data_config = OmegaConf.to_container(self.config.data, resolve=True)
             offpolicy_data_config["seed"] = (offpolicy_data_config.get("seed") or 42) + 7919
             offpolicy_data_config = OmegaConf.create(offpolicy_data_config)
 
-            if offpolicy_format == "text_chat":
+            # Legacy single-source text path stays only for `offpolicy_files` + text_chat
+            # WITHOUT a mixture. A mixture (offpolicy_datasets) always goes through the
+            # unified OfflinePreferenceDataset path — text_chat entries become
+            # TextChatPreferenceDataset, so per-dataset max_samples/selection and mixing
+            # text with tokenized formats all work.
+            use_legacy_text = not offpolicy_datasets and offpolicy_format == "text_chat"
+            if use_legacy_text:
                 # Legacy text path: RLHFDataset rows carry chosen_response/rejected_response
                 # chat messages, re-tokenized later by tokenize_offpolicy_pairs.
                 offpolicy_files_list = offpolicy_files if isinstance(offpolicy_files, list) else [offpolicy_files]
@@ -590,8 +602,10 @@ class RaySPINTrainer:
                     truncation=self.config.data.get("truncation", "error"),
                 )
             else:
-                # Pre-tokenized path: a pluggable OfflinePreferenceDataset yields token ids
-                # that assemble_offpolicy_pairs turns into the same layout (no re-tokenization).
+                # Unified path: a pluggable OfflinePreferenceDataset (single source, or a
+                # ConcatPreferenceDataset over the offpolicy_datasets mixture) yields token
+                # ids that assemble_offpolicy_pairs turns into the same layout (no
+                # re-tokenization in the trainer).
                 from recipe.spin.offline_data import (
                     build_offline_dataset,
                     make_tokenized_offpolicy_collate_fn,
@@ -603,6 +617,7 @@ class RaySPINTrainer:
                     max_prompt_length=self.config.data.max_prompt_length,
                     truncation=self.config.data.get("truncation", "error"),
                 )
+                self.offpolicy_pretokenized = True
 
             offpolicy_sampler = create_rl_sampler(offpolicy_data_config, offpolicy_dataset)
             offpolicy_batch_size = self.config.data.get("offpolicy_batch_size", self.config.data.train_batch_size)
@@ -1650,13 +1665,14 @@ class RaySPINTrainer:
 
                                     max_resp_len = self.config.data.max_response_length
                                     max_prmpt_len = self.config.data.max_prompt_length
-                                    if self.config.data.get("offpolicy_format", "text_chat") == "text_chat":
-                                        offpolicy_pairs = tokenize_offpolicy_pairs( # TODO: needs to return respoonse mask etc
+                                    if not self.offpolicy_pretokenized:
+                                        # Legacy text path: re-tokenize chat messages.
+                                        offpolicy_pairs = tokenize_offpolicy_pairs(
                                             offpolicy_batch, self.tokenizer, max_prmpt_len, max_resp_len,
                                         )
                                     else:
-                                        # Pre-tokenized: build the identical layout from token ids
-                                        # (no re-tokenization). See recipe.spin.offline_data.
+                                        # Pre-tokenized / mixture path: build the identical layout from
+                                        # token ids (no re-tokenization). See recipe.spin.offline_data.
                                         from recipe.spin.offline_data import assemble_offpolicy_pairs
 
                                         offpolicy_pairs = assemble_offpolicy_pairs(

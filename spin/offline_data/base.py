@@ -26,12 +26,15 @@ To add a new on-disk format: subclass :class:`OfflinePreferenceDataset`, return
 changes are required.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import numpy as np
 from torch.utils.data import Dataset
+
+logger = logging.getLogger(__name__)
 
 # Non-tensor batch keys carrying per-example response token ids between the collate fn
 # and ``assemble_offpolicy_pairs``. Defined here (verl-free) so both sides can import
@@ -88,11 +91,15 @@ class OfflinePreferenceDataset(Dataset, ABC):
 
     @classmethod
     @abstractmethod
-    def from_config(cls, data_cfg, path: str, tokenizer) -> "OfflinePreferenceDataset":
+    def from_config(
+        cls, data_cfg, path: str, tokenizer, *, max_samples=None, selection=None, seed=None
+    ) -> "OfflinePreferenceDataset":
         """Construct the dataset from the recipe ``data`` config and the offline path.
 
-        ``path`` is ``data.offpolicy_files`` resolved to a single str (a root dir or a
-        parquet path, depending on the format).
+        ``path`` is a single str (a root dir or a parquet path, depending on the format).
+        ``max_samples`` / ``selection`` / ``seed`` are per-dataset overrides supplied by
+        the ``offpolicy_datasets`` mixture; when ``None`` they fall back to the global
+        ``data.offpolicy_max_samples`` / ``data.offpolicy_selection`` config.
         """
         ...
 
@@ -104,27 +111,81 @@ class OfflinePreferenceDataset(Dataset, ABC):
 
     @staticmethod
     def select_rows(
-        n: int, is_empty: Optional[Callable[[int], bool]], drop_empty: bool, max_samples: int, name: str
+        n: int,
+        is_empty: Optional[Callable[[int], bool]],
+        drop_empty: bool,
+        max_samples: int,
+        name: str,
+        selection: str = "head",
+        seed: Optional[int] = None,
     ) -> np.ndarray:
         """Build the kept-row index array: optionally drop empty pairs, then cap to
         ``max_samples``. Shared by all formats. ``is_empty(i)`` reports whether row ``i``
         has an empty chosen/rejected response.
-        """
-        import logging
 
+        ``selection`` controls how the cap is applied when ``max_samples`` is smaller
+        than the (post-drop) row count: ``"head"`` keeps the first N rows; ``"random"``
+        keeps a random N-subset, deterministically seeded by ``seed`` (so the chosen
+        subset is stable across runs and checkpoint resumes). ``max_samples`` < 0 (or
+        >= row count) keeps all rows.
+        """
         if drop_empty and is_empty is not None:
             kept = [i for i in range(n) if not is_empty(i)]
             n_dropped = n - len(kept)
             if n_dropped:
-                logging.getLogger(__name__).warning(
-                    "%s: dropped %d/%d pairs with an empty chosen/rejected response.",
-                    name,
-                    n_dropped,
-                    n,
+                logger.warning(
+                    "%s: dropped %d/%d pairs with an empty chosen/rejected response.", name, n_dropped, n
                 )
         else:
             kept = list(range(n))
         rows = np.asarray(kept, dtype=np.int64)
-        if max_samples is not None and max_samples >= 0:
-            rows = rows[:max_samples]
+
+        if max_samples is not None and 0 <= max_samples < len(rows):
+            if selection == "head":
+                rows = rows[:max_samples]
+            elif selection == "random":
+                rng = np.random.RandomState(0 if seed is None else int(seed))
+                pick = rng.choice(len(rows), size=max_samples, replace=False)
+                rows = np.sort(rows[pick])  # sort to preserve read locality + determinism
+            else:
+                raise ValueError(f"{name}: unknown selection={selection!r} (expected 'head' or 'random').")
+            logger.info("%s: capped to %d pairs (selection=%s).", name, len(rows), selection)
         return rows
+
+
+class ConcatPreferenceDataset(OfflinePreferenceDataset):
+    """Concatenate several already-built/capped :class:`OfflinePreferenceDataset`s into
+    one pooled offline dataset.
+
+    Used by ``build_offline_dataset`` for the ``data.offpolicy_datasets`` mixture: each
+    entry is built (and per-dataset ``max_samples``/``selection`` applied) independently,
+    then pooled here. Uniform sampling over the pool means each source contributes in
+    proportion to its (capped) size — e.g. full Dataset 1 + 10k from Dataset 2.
+    """
+
+    def __init__(self, datasets: list[OfflinePreferenceDataset]):
+        if not datasets:
+            raise ValueError("ConcatPreferenceDataset requires at least one dataset.")
+        self.datasets = list(datasets)
+        self._cumlen = np.cumsum([0] + [len(d) for d in self.datasets]).astype(np.int64)
+
+    @classmethod
+    def from_config(
+        cls, data_cfg, path: str, tokenizer, *, max_samples=None, selection=None, seed=None
+    ) -> "ConcatPreferenceDataset":
+        # Not a registry format: built directly by build_offline_dataset from the
+        # data.offpolicy_datasets mixture, never dispatched via from_config.
+        raise NotImplementedError(
+            "ConcatPreferenceDataset is constructed by build_offline_dataset (from "
+            "data.offpolicy_datasets), not via from_config."
+        )
+
+    def __len__(self) -> int:
+        return int(self._cumlen[-1])
+
+    def __getitem__(self, idx: int) -> PreferenceExample:
+        if idx < 0:
+            idx += len(self)
+        d_idx = int(np.searchsorted(self._cumlen, idx, side="right") - 1)
+        local = idx - int(self._cumlen[d_idx])
+        return self.datasets[d_idx][local]
