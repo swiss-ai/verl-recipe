@@ -37,11 +37,22 @@ docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/verl
       subclasses vLLMHttpServer/vLLMReplica.
 - [ ] **DECISION NEEDED — the one real gap: recipe rollout path is vLLM-only;
       our stack is SGLang (vLLM disabled as broken in the CSCS image).**
-      Option A: revive vLLM rollout just for this recipe (fights the image).
-      Option B (recommended): write NeMoGymSGLangReplica against the fork's
-      async SGLang server + port the token-fidelity logic; SGLang exposes
-      token ids/logprobs natively (skip_tokenizer_init, return_logprob), so
-      the patch may shrink or vanish. Scope: ~days, not weeks.
+      Option A — vLLM 0.17 for the rollout path: MORE viable than first
+      thought. Our own estate already runs custom vLLM images on this
+      hardware (rob-poc: ghcr.io/robmsmt/vllm-cxi + swiss-ai/vllm_alps,
+      vllm_apertus_1.5) — the "vLLM disabled as broken" note is baked into
+      the Dec-2025 training image, possibly stale. Recipe is tested exactly
+      on 0.17.0. TODO: ask Imanol/Matteo WHY vLLM was disabled in the image.
+      Option B — SGLang: NOT from scratch. Upstream draft PR
+      NVIDIA-NeMo/gym#1787 (Kh4L) is a token-exact SGLang model server that
+      hit and fixed the precise failure we'd hit (prefix-stability assert +
+      retokenization drift, 48/48 tool turns failing) and is
+      convergence-validated full-scale (Qwen3-30B-A3B) on a fork branch.
+      Also: #976 (open ask since Mar 2026, describes our exact situation),
+      #1557 (second draft adaptor). Fastest path: trial #1787's branch;
+      reviewing/testing it also buys goodwill upstream.
+      Related: #2451/#2452 confirm the vLLM 0.17→0.25 pin pain is real and
+      acknowledged — the vLLM path stays version-brittle either way.
 - [ ] Adapt submit_math.sh -> Clariden sbatch (our launch.sh conventions,
       container env.toml, no verlai/verl docker image).
 - [ ] First smoke: math env (configs/math.yaml), 6-node smoke shape,
