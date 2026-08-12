@@ -86,3 +86,24 @@ put the semantics in the public contract, not in a patched internal.
 - Next real test: point this model server at the fork's SGLang rollout
   engine inside a verl training smoke (6-node shape) — that exercises the
   splice fix + prefix stability where it matters.
+
+## Environment on Clariden (hard-won, 2026-08-12 evening)
+- Two vendored dirs, NOT one: `nemo_gym_pydeps` (nemo-gym + uv + probe-found
+  gaps: devtools, yappi, gprof2dot, pydot) and `nemo_gym_pins`
+  (anthropic<=0.109.2, openai<=2.7.2 — newer than the container's).
+- WHY split: `nemo_gym/__init__._augment_sys_path()` REWRITES sys.path at
+  import time and demotes the package's own parent dir to last — so pins
+  vendored NEXT TO nemo-gym always lose to dist-packages. A separate pins dir
+  survives their weave logic ahead of site-packages (their docstring even
+  says so). Cost of learning this: 4 failed probe cycles.
+- Other traps hit: pip --target skips packages the env already satisfies
+  (need --ignore-installed); multi-package --target installs collide on bin/
+  (split invocations + --upgrade); CE containers are per-srun-step, so
+  in-container pip upgrades do NOT persist to later sruns (unlike pyxis
+  --container-name reuse the NVIDIA tutorial relies on).
+- setup_nemo_deps.sh (this dir) rebuilds both dirs and gates .ready on an
+  in-container import probe. nemo_gym_smoke.sbatch is the 2-node GRPO smoke.
+- Fork API drift fixed in agent_loop.py: create() is passthrough (fork passes
+  llm_client, not worker_group), addresses come from
+  GlobalRequestLoadBalancer.get_all_servers(), and NEMO_GYM_PYDEPS forces the
+  pins dir to the front before nemo_gym import.
