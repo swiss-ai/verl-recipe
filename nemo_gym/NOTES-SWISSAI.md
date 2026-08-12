@@ -107,3 +107,18 @@ put the semantics in the public contract, not in a patched internal.
   llm_client, not worker_group), addresses come from
   GlobalRequestLoadBalancer.get_all_servers(), and NEMO_GYM_PYDEPS forces the
   pins dir to the front before nemo_gym import.
+
+## ✅ TRAINING SMOKE GREEN — 2026-08-12, job 3069020 (9m03s, COMPLETED)
+Full chain: swiss-ai verl (1p5-async-rl, FSDP, GRPO) → native SGLang rollout
+(mode=async) → NeMoGymAgentLoopManager (this branch) → sglang_model server
+(Kh4L/NemoGym @ 71f2243, ray floor lowered to 2.52.1 locally) →
+math_with_judge env → rewards → backprop. 2 nodes × 4 GH200, Apertus-1.5-8B.
+3 steps × 32 rollouts: rewards 0.031 → 0.156 → 0.188 (learning signal!),
+~5-6 rollouts/s collection, 14-52 s/step.
+Failure ladder climbed to get here (8 submissions): hf-hub --target shadowing
+→ pip constraints unsatisfiable → --no-deps probe loop → --ignore-installed
+→ CE containers don't persist overlays → nemo_gym _augment_sys_path demotes
+its own install root (split-pins fix) → x86 uv binary → ray floor conflict →
+stale venvs → dataloader OOM (--mem=0 + num_workers=0). Every fix is in
+setup_nemo_deps.sh / nemo_gym_smoke.sbatch in this directory.
+Next: post results on NVIDIA-NeMo/gym#1787; scale shape; bake deps into image.
