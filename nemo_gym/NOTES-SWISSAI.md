@@ -71,3 +71,18 @@ put the semantics in the public contract, not in a patched internal.
       SANDBOX_BACKEND=none equivalent (no code data), gym servers co-located.
 - [ ] Then: resources servers as rob-poc Deployments (stateless), measure
       rollout-loop latency vs co-located before committing.
+
+## SGLang path — trial log
+- 2026-08-12: cloned Kh4L/NemoGym @ sglang-splice-fix (PIN: 71f2243be6bc —
+  fork branches can rebase; always reference the SHA). `gym list models` from
+  the checkout registers `sglang_model/sglang_model_for_training`. Clone on
+  clariden: /iopsstor/scratch/cscs/rosmith/NemoGym-sglang; run via
+  `uv run --python 3.13 --with-editable . gym ...` from inside it.
+- PR adds a self-contained responses_api_models/sglang_model/ server
+  (+1,463 lines, 12 files, with tests + a for-training config) — no core
+  monkeypatch; token fidelity via SGLang's public API. Draft PR against
+  NVIDIA-NeMo/gym main; watch for merge, and consider posting our validation
+  results on the PR (goodwill + keeps it alive).
+- Next real test: point this model server at the fork's SGLang rollout
+  engine inside a verl training smoke (6-node shape) — that exercises the
+  splice fix + prefix stability where it matters.
