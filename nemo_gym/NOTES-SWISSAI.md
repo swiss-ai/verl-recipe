@@ -53,6 +53,18 @@ docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/verl
       reviewing/testing it also buys goodwill upstream.
       Related: #2451/#2452 confirm the vLLM 0.17→0.25 pin pain is real and
       acknowledged — the vLLM path stays version-brittle either way.
+
+## Why the vLLM pin exists at all (the "makes no sense" answer)
+The OpenAI chat contract is a TEXT API; RL training needs a TOKEN API (exact
+sampled token ids + logprobs; multi-turn prefix stability). Tokenization does
+not round-trip (same text ≠ same BPE sequence), so text-level HTTP silently
+corrupts training. vLLM's public API hides tokens → the recipe monkeypatches
+vLLM serving internals → pinned to the version whose internals it patched.
+SGLang's PUBLIC API is already token-native over HTTP (/generate with
+input_ids, return_logprob, skip_tokenizer_init — flags our prod config sets).
+Conclusion: the SGLang path (#1787) doesn't port the hack, it removes the
+need for it. Same principle as our /run_tests-vs-vendored-harness argument:
+put the semantics in the public contract, not in a patched internal.
 - [ ] Adapt submit_math.sh -> Clariden sbatch (our launch.sh conventions,
       container env.toml, no verlai/verl docker image).
 - [ ] First smoke: math env (configs/math.yaml), 6-node smoke shape,
