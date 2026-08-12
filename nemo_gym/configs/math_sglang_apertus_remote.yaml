@@ -1,0 +1,18 @@
+# swiss-ai smoke, remote-verifier variant: same as math_sglang_apertus.yaml
+# but the math_with_judge resources server is NOT spawned on the compute
+# node — rollout rewards come from the verifier service on breithorn k8s
+# (https://nemo-gym-math-dev.swissai.svc.cscs.ch, rob-poc GitOps).
+#
+# Needs the swiss-ai/nemo-gym fork's `swissai-k8s` branch merged into the
+# NemoGym checkout: it adds ServerClient support for explicit `url` entries
+# and ships math_with_judge_remote.yaml. See NOTES-SWISSAI.md.
+nemo_gym:
+  nemo_gym_root: $NEMO_GYM_ROOT
+  uses_reasoning_parser: false
+  model_server: sglang_model
+  policy_model_overrides:
+    context_length: 4096
+    uses_reasoning_parser: false
+  config_paths:
+    - $NEMO_GYM_ROOT/responses_api_models/sglang_model/configs/sglang_model_for_training.yaml
+    - $NEMO_GYM_ROOT/resources_servers/math_with_judge/configs/math_with_judge_remote.yaml

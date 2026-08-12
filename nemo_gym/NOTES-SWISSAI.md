@@ -122,3 +122,30 @@ its own install root (split-pins fix) → x86 uv binary → ray floor conflict �
 stale venvs → dataloader OOM (--mem=0 + num_workers=0). Every fix is in
 setup_nemo_deps.sh / nemo_gym_smoke.sbatch in this directory.
 Next: post results on NVIDIA-NeMo/gym#1787; scale shape; bake deps into image.
+
+## Remote verifier on breithorn k8s (2026-08-13)
+
+The math_with_judge resources server now also runs as a service on breithorn
+(rob-poc GitOps): https://nemo-gym-math-dev.swissai.svc.cscs.ch (source-
+whitelisted; GET / for liveness, POST /verify). Image + manifests come from
+the swiss-ai/nemo-gym fork, branch `swissai-k8s`.
+
+To train against it instead of spawning the verifier per job:
+
+1. Merge `swissai-k8s` into the Clariden NemoGym checkout — it adds
+   ServerClient support for explicit `url:` entries (http://host:port can't
+   express a TLS ingress) and ships
+   `resources_servers/math_with_judge/configs/math_with_judge_remote.yaml`
+   (a `url` entry with no `entrypoint` = "don't spawn, call it where it is"):
+
+       cd $SCRATCH/NemoGym-sglang
+       git remote add swissai https://github.com/swiss-ai/nemo-gym 2>/dev/null || true
+       git fetch swissai swissai-k8s && git merge swissai/swissai-k8s
+
+2. Submit the same smoke with the remote agent config:
+
+       sbatch --export=ALL,AGENT_CONFIG=math_sglang_apertus_remote.yaml \
+         nemo_gym_smoke.sbatch
+
+Only 3 local uvicorns come up (head, policy sglang_model, simple_agent);
+rewards round-trip Clariden -> breithorn ingress -> math-verify pod.

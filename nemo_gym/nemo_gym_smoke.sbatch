@@ -35,6 +35,11 @@ PINS="${SCRATCH}/nemo_gym_pins"
 RUN_DIR="${WORKING_DIR}/outputs/nemo-gym-smoke/${SLURM_JOB_ID}"
 mkdir -p "${RUN_DIR}"
 
+# Agent-loop config: default spawns the verifier locally; submit with
+#   sbatch --export=ALL,AGENT_CONFIG=math_sglang_apertus_remote.yaml ...
+# to use the verifier service on breithorn k8s instead (see configs/).
+AGENT_CONFIG="${AGENT_CONFIG:-math_sglang_apertus.yaml}"
+
 ENVIRONMENT_PATH="/capstor/store/cscs/swissai/infra01/reasoning/raas/docker/vs:251215-degenstop/env.toml"
 SRUN_ENV=(--environment="${ENVIRONMENT_PATH}" --container-writable)
 
@@ -97,7 +102,7 @@ srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
       actor_rollout_ref.rollout.n=4 \
       actor_rollout_ref.rollout.temperature=1.0 \
       +actor_rollout_ref.rollout.agent.agent_loop_manager_class=recipe.nemo_gym.agent_loop.NeMoGymAgentLoopManager \
-      actor_rollout_ref.rollout.agent.agent_loop_config_path='${WORKING_DIR}/recipe/nemo_gym/configs/math_sglang_apertus.yaml' \
+      actor_rollout_ref.rollout.agent.agent_loop_config_path='${WORKING_DIR}/recipe/nemo_gym/configs/${AGENT_CONFIG}' \
       reward_model.reward_manager=dapo \
       +reward_model.reward_kwargs.max_resp_len=2048 \
       'trainer.logger=[console]' \
