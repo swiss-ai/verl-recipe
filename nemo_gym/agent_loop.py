@@ -112,6 +112,18 @@ class NeMoGymAgentLoopManager(AgentLoopManager):
         _raw = nemo_gym_cfg.get("nemo_gym_root") or ""
         nemo_gym_root = _raw if (_raw and not _raw.startswith("$")) else os.environ.get("NEMO_GYM_ROOT")
 
+        # Force vendored deps (anthropic/openai pins) to win over the container's
+        # older copies regardless of import order: NEMO_GYM_PYDEPS is prepended
+        # to sys.path and any pre-imported modules are purged. Containers on CE
+        # are per-srun-step, so container-level pip upgrades do not persist.
+        _pydeps = os.environ.get("NEMO_GYM_PYDEPS")
+        if _pydeps and Path(_pydeps).is_dir():
+            if _pydeps in sys.path:
+                sys.path.remove(_pydeps)
+            sys.path.insert(0, _pydeps)
+            for _m in [m for m in list(sys.modules) if m.split(".")[0] in ("anthropic", "openai")]:
+                del sys.modules[_m]
+
         try:
             from nemo_gym.cli import GlobalConfigDictParserConfig, RunHelper
             from nemo_gym.rollout_collection import RolloutCollectionHelper
