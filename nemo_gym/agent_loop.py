@@ -81,23 +81,13 @@ class NeMoGymAgentLoopManager(AgentLoopManager):
 
     @classmethod
     @auto_await
-    async def create(
-        cls,
-        config,
-        worker_group=None,
-        rollout_resource_pool=None,
-        reward_loop_worker_handles=None,
-        teacher_model_manager=None,
-    ) -> NeMoGymAgentLoopManager:
-        instance = cls(
-            config,
-            worker_group,
-            rollout_resource_pool,
-            teacher_model_manager,
-            reward_loop_worker_handles,
-        )
-        await instance._initialize_llm_servers()
-        await instance._init_global_load_balancer()
+    async def create(cls, *args, **kwargs) -> NeMoGymAgentLoopManager:
+        # swiss-ai fork (1p5-async-rl) contract: rollout servers are built by
+        # LLMServerManager inside ray_trainer; this manager receives config +
+        # llm_client (+ teacher_client, reward_loop_worker_handles). We therefore
+        # skip the upstream _initialize_llm_servers/_init_global_load_balancer
+        # bootstrap entirely and pass all args straight through.
+        instance = cls(*args, **kwargs)
         await instance._apply_server_patch()
         await instance._init_nemo_gym()
         return instance
@@ -156,9 +146,12 @@ class NeMoGymAgentLoopManager(AgentLoopManager):
                 False
             )
 
+        # Fork: server addresses live in the global load balancer registry
+        # (registry keys ARE the addresses); reachable via the injected client.
+        server_addresses = await self.llm_client._load_balancer.get_all_servers.remote()
         base_urls = [
             (addr if addr.startswith("http") else f"http://{addr}").rstrip("/") + "/v1"
-            for addr in self.server_addresses
+            for addr in server_addresses
         ]
         initial_global_cfg["policy_model_name"] = self.model_config.get("path", "")
         initial_global_cfg["policy_api_key"] = "dummy_key"
@@ -202,7 +195,7 @@ class NeMoGymAgentLoopManager(AgentLoopManager):
         )
         self._rollout_thread.start()
 
-        logger.info(f"NeMoGymAgentLoopManager ready: {len(base_urls)} vLLM endpoints: {base_urls}")
+        logger.info(f"NeMoGymAgentLoopManager ready: {len(base_urls)} rollout endpoints: {base_urls}")
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         future = asyncio.run_coroutine_threadsafe(self._async_generate_sequences(prompts), self._rollout_loop)
