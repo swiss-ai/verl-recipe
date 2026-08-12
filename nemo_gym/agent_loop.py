@@ -62,9 +62,21 @@ _postprocess = _AgentLoopWorker._postprocess
 
 class NeMoGymAgentLoopManager(AgentLoopManager):
     def __init__(self, *args, **kwargs):
-        from recipe.nemo_gym.replica import NeMoGymvLLMReplica
+        # Engine-aware: the vLLM replica override + server monkeypatch exist to
+        # smuggle token ids/logprobs through vLLM's text-level OpenAI layer.
+        # SGLang's public API is token-native (input_ids, return_logprob), so
+        # with rollout.name=sglang we use verl's native replica untouched and
+        # rely on the nemo-gym sglang_model server (NVIDIA-NeMo/gym#1787).
+        rollout_name = None
+        try:
+            rollout_name = kwargs.get("config", args[0] if args else None).actor_rollout_ref.rollout.name
+        except Exception:
+            pass
+        self._nemo_gym_engine = str(rollout_name or "vllm")
+        if self._nemo_gym_engine == "vllm":
+            from recipe.nemo_gym.replica import NeMoGymvLLMReplica
 
-        self.rollout_replica_class = NeMoGymvLLMReplica
+            self.rollout_replica_class = NeMoGymvLLMReplica
         super().__init__(*args, **kwargs)
 
     @classmethod
@@ -91,6 +103,8 @@ class NeMoGymAgentLoopManager(AgentLoopManager):
         return instance
 
     async def _apply_server_patch(self) -> None:
+        if getattr(self, "_nemo_gym_engine", "vllm") != "vllm":
+            return  # sglang path: no monkeypatch needed (token-native API)
         futs = [handle.apply_nemo_gym_server_patch.remote() for handle in self.server_handles]
         await asyncio.get_event_loop().run_in_executor(None, ray.get, futs)
 
@@ -127,12 +141,15 @@ class NeMoGymAgentLoopManager(AgentLoopManager):
         initial_global_cfg = {"config_paths": config_paths} if config_paths else {}
 
         uses_reasoning_parser = nemo_gym_cfg.get("uses_reasoning_parser", False)
+        model_server_key = nemo_gym_cfg.get("model_server", "vllm_model")
         vllm_model_cfg = (
             initial_global_cfg.setdefault("policy_model", {})
             .setdefault("responses_api_models", {})
-            .setdefault("vllm_model", {})
+            .setdefault(model_server_key, {})
         )
         vllm_model_cfg["uses_reasoning_parser"] = uses_reasoning_parser
+        for k, v in (nemo_gym_cfg.get("policy_model_overrides") or {}).items():
+            vllm_model_cfg[k] = v
 
         if not uses_reasoning_parser:
             vllm_model_cfg.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})["enable_thinking"] = (
