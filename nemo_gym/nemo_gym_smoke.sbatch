@@ -55,6 +55,11 @@ LOGGER="${LOGGER:-console}"
 ENVIRONMENT_PATH="/capstor/store/cscs/swissai/infra01/reasoning/raas/docker/vs:251215-degenstop/env.toml"
 SRUN_ENV=(--environment="${ENVIRONMENT_PATH}" --container-writable)
 
+# Ray's OTel metrics exporter segfaulted a worker mid-startup (grpc DNS
+# resolution on the export tick, job 3071938); we don't consume these
+# metrics, so disable the exporter entirely.
+export OTEL_SDK_DISABLED=true OTEL_METRICS_EXPORTER=none OTEL_TRACES_EXPORTER=none
+
 export HF_HOME="${SCRATCH}/huggingface"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export PYTHONUNBUFFERED=1
