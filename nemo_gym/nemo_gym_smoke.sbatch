@@ -83,9 +83,13 @@ export RAY_ADDRESS="${ip_head}"
 srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
   bash -lc "cd '${WORKING_DIR}' && ray start --head --temp-dir=/tmp/ray-${USERNAME} --node-ip-address='${head_node_ip}' --port='${port}' --num-cpus 64 --num-gpus 4 --block" &
 sleep 15
-srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${nodes_array[1]}" \
-  bash -lc "cd '${WORKING_DIR}' && ray start --temp-dir=/tmp/ray-${USERNAME} --address '${ip_head}' --num-cpus 64 --num-gpus 4 --block" &
-sleep 20
+# All remaining nodes join as Ray workers (scales to any --nodes).
+for node in "${nodes_array[@]:1}"; do
+  srun "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${node}" \
+    bash -lc "cd '${WORKING_DIR}' && ray start --temp-dir=/tmp/ray-${USERNAME} --address '${ip_head}' --num-cpus 64 --num-gpus 4 --block" &
+done
+# Give workers time to register; larger fleets need longer.
+sleep $(( 20 + SLURM_JOB_NUM_NODES / 4 ))
 
 srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
   bash -lc "cd '${WORKING_DIR}' && \
@@ -131,5 +135,5 @@ srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
       trainer.save_freq=${SAVE_FREQ} \
       trainer.total_epochs=100 \
       trainer.total_training_steps=${TOTAL_STEPS} \
-      trainer.nnodes=2 \
+      trainer.nnodes=${SLURM_JOB_NUM_NODES} \
       trainer.n_gpus_per_node=4"
