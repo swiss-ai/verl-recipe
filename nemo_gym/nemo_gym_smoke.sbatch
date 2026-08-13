@@ -117,7 +117,7 @@ srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
       actor_rollout_ref.rollout.agent.agent_loop_config_path='${WORKING_DIR}/recipe/nemo_gym/configs/${AGENT_CONFIG}' \
       reward_model.reward_manager=dapo \
       +reward_model.reward_kwargs.max_resp_len=2048 \
-      "trainer.logger=[${LOGGER}]" \
+      'trainer.logger=[${LOGGER}]' \
       trainer.project_name=nemo-gym-smoke \
       trainer.experiment_name=sglang-apertus8b-math \
       trainer.default_local_dir='${RUN_DIR}' \
