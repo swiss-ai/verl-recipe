@@ -40,6 +40,18 @@ mkdir -p "${RUN_DIR}"
 # to use the verifier service on breithorn k8s instead (see configs/).
 AGENT_CONFIG="${AGENT_CONFIG:-math_sglang_apertus.yaml}"
 
+# Training knobs, overridable at submit time, e.g.:
+#   sbatch --time=04:00:00 --export=ALL,TOTAL_STEPS=50,SAVE_FREQ=25 ...
+# TOTAL_STEPS x ~1 min/step at the default shape; raise --time accordingly.
+# LOGGER=console,wandb streams to W&B project nemo-gym-smoke (needs WANDB_API_KEY,
+# sourced from ~/.wandbkey below if present).
+TOTAL_STEPS="${TOTAL_STEPS:-3}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
+ROLLOUT_N="${ROLLOUT_N:-4}"
+SAVE_FREQ="${SAVE_FREQ:--1}"
+LOGGER="${LOGGER:-console}"
+[ -f "/users/${USERNAME}/.wandbkey" ] && export WANDB_API_KEY="$(cat /users/${USERNAME}/.wandbkey)"
+
 ENVIRONMENT_PATH="/capstor/store/cscs/swissai/infra01/reasoning/raas/docker/vs:251215-degenstop/env.toml"
 SRUN_ENV=(--environment="${ENVIRONMENT_PATH}" --container-writable)
 
@@ -86,12 +98,12 @@ srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
       data.truncation=left \
       data.max_prompt_length=1024 \
       data.max_response_length=2048 \
-      data.train_batch_size=8 \
+      data.train_batch_size=${BATCH_SIZE} \
       actor_rollout_ref.model.path='${MODEL}' \
       actor_rollout_ref.actor.use_kl_loss=False \
       actor_rollout_ref.actor.entropy_coeff=0 \
       actor_rollout_ref.actor.optim.lr=1e-6 \
-      actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+      actor_rollout_ref.actor.ppo_mini_batch_size=${BATCH_SIZE} \
       actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
       actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
       actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
@@ -99,20 +111,20 @@ srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
       actor_rollout_ref.rollout.mode=async \
       actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
-      actor_rollout_ref.rollout.n=4 \
+      actor_rollout_ref.rollout.n=${ROLLOUT_N} \
       actor_rollout_ref.rollout.temperature=1.0 \
       +actor_rollout_ref.rollout.agent.agent_loop_manager_class=recipe.nemo_gym.agent_loop.NeMoGymAgentLoopManager \
       actor_rollout_ref.rollout.agent.agent_loop_config_path='${WORKING_DIR}/recipe/nemo_gym/configs/${AGENT_CONFIG}' \
       reward_model.reward_manager=dapo \
       +reward_model.reward_kwargs.max_resp_len=2048 \
-      'trainer.logger=[console]' \
+      "trainer.logger=[${LOGGER}]" \
       trainer.project_name=nemo-gym-smoke \
       trainer.experiment_name=sglang-apertus8b-math \
       trainer.default_local_dir='${RUN_DIR}' \
       trainer.val_before_train=False \
       trainer.test_freq=-1 \
-      trainer.save_freq=-1 \
-      trainer.total_epochs=1 \
-      trainer.total_training_steps=3 \
+      trainer.save_freq=${SAVE_FREQ} \
+      trainer.total_epochs=100 \
+      trainer.total_training_steps=${TOTAL_STEPS} \
       trainer.nnodes=2 \
       trainer.n_gpus_per_node=4"
