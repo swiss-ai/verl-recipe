@@ -49,8 +49,16 @@ TOTAL_STEPS="${TOTAL_STEPS:-3}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 ROLLOUT_N="${ROLLOUT_N:-4}"
 SAVE_FREQ="${SAVE_FREQ:--1}"
-LOGGER="${LOGGER:-console}"
-[ -f "/users/${USERNAME}/.wandbkey" ] && export WANDB_API_KEY="$(cat /users/${USERNAME}/.wandbkey)"
+# W&B on by default when the key exists. NOTE: slurm's --export splits on
+# commas (backslash-escaping does NOT work), so explicit overrides must use
+# '+' as the separator (LOGGER=console+wandb) — translated to ',' here.
+if [ -f "/users/${USERNAME}/.wandbkey" ]; then
+  export WANDB_API_KEY="$(cat /users/${USERNAME}/.wandbkey)"
+  LOGGER="${LOGGER:-console+wandb}"
+else
+  LOGGER="${LOGGER:-console}"
+fi
+LOGGER="${LOGGER//+/,}"
 
 ENVIRONMENT_PATH="/capstor/store/cscs/swissai/infra01/reasoning/raas/docker/vs:251215-degenstop/env.toml"
 SRUN_ENV=(--environment="${ENVIRONMENT_PATH}" --container-writable)
