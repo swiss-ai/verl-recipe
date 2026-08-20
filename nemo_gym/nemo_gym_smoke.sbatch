@@ -28,7 +28,9 @@ SCRATCH="/iopsstor/scratch/cscs/${USERNAME}"
 export HOME="${SCRATCH}"
 WORKING_DIR="${SCRATCH}/projects/verl"
 export NEMO_GYM_ROOT="${SCRATCH}/NemoGym-sglang"
-DATA_DIR="${SCRATCH}/nemo-gym/math_data"
+# Dataset dir (train.jsonl + validation.jsonl); override per env, e.g.
+#   --export=ALL,DATA_DIR=/iopsstor/.../nemo-gym/blackjack_data,AGENT_CONFIG=blackjack_sglang_apertus_remote.yaml
+DATA_DIR="${DATA_DIR:-${SCRATCH}/nemo-gym/math_data}"
 MODEL="/capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816"
 DEPS="${SCRATCH}/nemo_gym_pydeps"
 PINS="${SCRATCH}/nemo_gym_pins"

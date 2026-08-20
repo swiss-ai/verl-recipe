@@ -1,0 +1,17 @@
+# Stateful-env training smoke: blackjack (Gymnasium-style reset/step) with
+# the environment served REMOTELY from breithorn k8s. The gymnasium_agent
+# runs locally next to the policy and drives the episode loop; every reward
+# round-trips Clariden -> https://gym-dev.swissai.svc.cscs.ch/blackjack.
+#
+# Data: trivially generated rows (see make_blackjack_data.py) — every episode
+# is randomized server-side, the prompt is just "Deal me in".
+nemo_gym:
+  nemo_gym_root: $NEMO_GYM_ROOT
+  uses_reasoning_parser: false
+  model_server: sglang_model
+  policy_model_overrides:
+    context_length: 4096
+    uses_reasoning_parser: false
+  config_paths:
+    - $NEMO_GYM_ROOT/responses_api_models/sglang_model/configs/sglang_model_for_training.yaml
+    - $NEMO_GYM_ROOT/resources_servers/blackjack/configs/blackjack_remote.yaml
