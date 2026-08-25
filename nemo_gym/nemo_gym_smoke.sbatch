@@ -125,9 +125,10 @@ srun --overlap "${SRUN_ENV[@]}" --nodes=1 --ntasks=1 -w "${head_node}" \
       actor_rollout_ref.actor.entropy_coeff=0 \
       actor_rollout_ref.actor.optim.lr=1e-6 \
       actor_rollout_ref.actor.ppo_mini_batch_size=${BATCH_SIZE} \
-      actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
-      actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
-      actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+      actor_rollout_ref.actor.use_dynamic_bsz=${DYNAMIC_BSZ:-True} \
+      actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${MAX_TOKEN_LEN:-8192} \
+      actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${MAX_TOKEN_LEN:-8192} \
+      actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${MAX_TOKEN_LEN:-8192} \
       actor_rollout_ref.rollout.name=sglang \
       actor_rollout_ref.rollout.mode=async \
       actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
